@@ -1,5 +1,5 @@
 import torch
-
+# Golden Eagle Optimization Algorithm Optimizer class
 class Optimizer:
 
     def __init__(self, pop_size, dim, lower, upper, max_fes, device):
@@ -12,22 +12,29 @@ class Optimizer:
 
     def optimize(self, func):
 
-        # Initialize population on GPU
-        population = torch.empty(
-            self.pop_size, self.dim, device=self.device
-        ).uniform_(self.lower, self.upper)
+        pop = torch.empty(self.pop_size, self.dim, device=self.device)\
+            .uniform_(self.lower, self.upper)
 
         FEs = 0
         best_value = float("inf")
 
         while FEs < self.max_fes:
 
-            fitness = func(population)
+            fitness = func(pop)
             FEs += self.pop_size
 
-            current_best = torch.min(fitness).item()
-            best_value = min(best_value, current_best)
+            best_idx = torch.argmin(fitness)
+            best = pop[best_idx]
 
-            ### Algorithm to be added 
+            best_value = min(best_value, fitness[best_idx].item())
+
+            direction = best - pop
+            rand = torch.randn_like(pop)
+
+            step = torch.rand(self.pop_size, 1, device=self.device)
+
+            pop = pop + step * direction + 0.01 * rand
+
+            pop = torch.clamp(pop, self.lower, self.upper)
 
         return best_value
