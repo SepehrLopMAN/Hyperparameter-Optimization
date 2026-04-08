@@ -1,437 +1,328 @@
 """
-cec_benchmarks.py  —  CEC-Style Benchmark Suite  (13 functions)
-================================================================
-All CEC-style functions apply two transforms to the base function:
-    1. Shift   : y = x − o        (moves global optimum away from origin)
-    2. Rotation: z = (x − o) @ M  (couples all variables — breaks separability)
-where  o  is a random shift vector and  M  is a Haar-distributed orthogonal
-rotation matrix, both generated once from a fixed seed on the target device.
+cec_benchmarks.py  —  CEC-Style Benchmarks F1–F30
+==================================================
+Implements the 30-function CEC benchmark suite:
 
-This mirrors the official CEC 2017 / CEC 2021 benchmark philosophy:
-    • Shifted     : prevents algorithms from exploiting "optimum at origin"
-    • Rotated     : the key non-separability test — algorithms that rely on
-                    treating dimensions independently fail here
-    • Scaled      : some components have wildly different curvatures
+  A. Unimodal Functions   (F1–F10)   shift + rotation + per-function scaling
+  B. Hybrid Functions     (F11–F20)  dimension-partitioned component mix
+  C. Composite Functions  (F21–F30)  weighted nonlinear combination
 
-Usage
-─────
-    from cec_benchmarks import make_cec_benchmarks
+Basic component functions f1–f20 are imported directly from benchmarks.py
+(the decorated functions there ARE the raw batch functions — the @register
+decorator returns them unchanged).
 
-    CEC_BENCHMARKS = make_cec_benchmarks(device=device, dim=DIM, seed=2024)
-    # Returns the same dict structure as BENCHMARKS in benchmarks.py
-
-Why not use official CEC data files?
-─────────────────────────────────────
-Official CEC evaluations require proprietary .mat/.npy files for exact
-reproducibility with the competition leaderboard.  This implementation
-generates the same mathematical structures (shift vectors, orthogonal
-rotation matrices) from a fixed seed, giving:
-    ✓ Full reproducibility across machines
-    ✓ GPU-native (no file I/O in the hot loop)
-    ✓ Arbitrary DIM without redownloading files
-    ✗ Not comparable to official CEC leaderboard numbers
-
-For official CEC comparison, replace the generated o/M with loaded data files.
-
-Categories
-──────────
-    cec_unimodal    : 4 functions  (unimodal + rotation → hardest unimodal)
-    cec_multimodal  : 5 functions  (multimodal + rotation)
-    cec_complex     : 1 function   (high-modal + rotation)
-    cec_hybrid      : 2 functions  (different functions for variable sub-groups)
-    cec_composition : 1 function   (5-component weighted mixture)
+All tensors are placed on `device` at build-time; no .cpu() calls in hot paths.
+Random state is seeded deterministically from `seed` on the CPU so results
+are identical across CUDA device generations.
 """
 
 import torch
 import math
 
+from benchmarks import F1, F2, F3, F4, F5, F6, F7, F8, F9, F10
+from benchmarks import F11, F12, F13, F14, F15, F16, F17, F18, F19, F20
 
-# ─── Rotation matrix helper ───────────────────────────────────────────────────
+# 1-based lookup table:  _BASIC[k] = fk
+# The imported symbols are the raw PyTorch batch functions (shape: pop×D → pop).
+_BASIC = [
+    None,                                    # index 0 — placeholder
+    F1,  F2,  F3,  F4,  F5,
+    F6,  F7,  F8,  F9,  F10,
+    F11, F12, F13, F14, F15,
+    F16, F17, F18, F19, F20,
+]
 
-def _haar_rotation(D: int, device: torch.device, dtype=torch.float32) -> torch.Tensor:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Factory
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_cec_benchmarks(device, dim: int = 100, seed: int = 2024) -> dict:
     """
-    Haar-distributed random orthogonal matrix via QR decomposition.
-    det = +1 guaranteed by sign correction from R's diagonal.
-    Shape: (D, D).
-    """
-    G    = torch.randn(D, D, device=device, dtype=dtype)
-    Q, R = torch.linalg.qr(G)
-    # Enforce Haar measure: flip columns so diag(R) is all positive
-    Q    = Q * torch.sign(torch.diag(R)).unsqueeze(0)
-    return Q
-
-
-def _shift_vec(D: int, lo: float, hi: float,
-               device: torch.device, dtype=torch.float32) -> torch.Tensor:
-    """
-    Uniform shift in the interior 80% of [lo, hi] so the optimum is
-    never on the boundary and always inside the search domain.
-    Shape: (D,).
-    """
-    margin = 0.1 * (hi - lo)
-    return torch.empty(D, device=device, dtype=dtype).uniform_(lo + margin, hi - margin)
-
-
-def _transform(X: torch.Tensor, o: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
-    """
-    Apply shift then rotation:   Z = (X − o) @ M
-    X: (N, D)  o: (D,)  M: (D, D)  →  Z: (N, D)
-    The global optimum of the base function at z=z* maps to x = o + z* @ M.T
-    For zero-optimum base functions (z*=0): x* = o, f(x*) = base_f(0) ✓
-    """
-    return (X - o.unsqueeze(0)) @ M
-
-
-# ─── Base function primitives (all dimension-agnostic via Y.shape) ─────────────
-
-def _f_bent_cigar(Y: torch.Tensor) -> torch.Tensor:
-    return Y[:, 0] ** 2 + 1e6 * torch.sum(Y[:, 1:] ** 2, dim=1)
-
-
-def _f_zakharov(Y: torch.Tensor) -> torch.Tensor:
-    D  = Y.shape[1]
-    i  = torch.arange(1, D + 1, dtype=Y.dtype, device=Y.device)
-    s1 = torch.sum(Y ** 2, dim=1)
-    s2 = torch.sum(0.5 * i.unsqueeze(0) * Y, dim=1)
-    return s1 + s2 ** 2 + s2 ** 4
-
-
-def _f_rosenbrock(Y: torch.Tensor) -> torch.Tensor:
-    return torch.sum(
-        100 * (Y[:, 1:] - Y[:, :-1] ** 2) ** 2 + (1 - Y[:, :-1]) ** 2,
-        dim=1,
-    )
-
-
-def _f_elliptic(Y: torch.Tensor) -> torch.Tensor:
-    D = Y.shape[1]
-    i = torch.arange(D, dtype=Y.dtype, device=Y.device)
-    w = (1e6) ** (i / max(D - 1, 1))
-    return torch.sum(w.unsqueeze(0) * Y ** 2, dim=1)
-
-
-def _f_rastrigin(Y: torch.Tensor) -> torch.Tensor:
-    D = Y.shape[1]
-    return 10 * D + torch.sum(Y ** 2 - 10 * torch.cos(2 * math.pi * Y), dim=1)
-
-
-def _f_ackley(Y: torch.Tensor) -> torch.Tensor:
-    D       = Y.shape[1]
-    sum_sq  = torch.sum(Y ** 2, dim=1)
-    sum_cos = torch.sum(torch.cos(2 * math.pi * Y), dim=1)
-    return (
-        -20 * torch.exp(-0.2 * torch.sqrt(sum_sq / D))
-        - torch.exp(sum_cos / D)
-        + 20 + math.e
-    )
-
-
-def _f_schwefel(Y: torch.Tensor) -> torch.Tensor:
-    """Modified Schwefel — clipped to [-500, 500] in y-space."""
-    D  = Y.shape[1]
-    Yc = Y.clamp(-500, 500)
-    return 418.9829 * D - torch.sum(Yc * torch.sin(torch.sqrt(torch.abs(Yc))), dim=1)
-
-
-def _f_griewank(Y: torch.Tensor) -> torch.Tensor:
-    D      = Y.shape[1]
-    i_sqrt = torch.arange(1, D + 1, dtype=Y.dtype, device=Y.device).sqrt()
-    s      = torch.sum(Y ** 2, dim=1) / 4000
-    p      = torch.prod(torch.cos(Y / i_sqrt.unsqueeze(0)), dim=1)
-    return s - p + 1
-
-
-def _f_levy(Y: torch.Tensor) -> torch.Tensor:
-    w  = 1 + (Y - 1) / 4
-    t1 = torch.sin(math.pi * w[:, 0]) ** 2
-    t2 = torch.sum(
-        (w[:, :-1] - 1) ** 2 * (1 + 10 * torch.sin(math.pi * w[:, 1:]) ** 2),
-        dim=1,
-    )
-    t3 = (w[:, -1] - 1) ** 2 * (1 + torch.sin(2 * math.pi * w[:, -1]) ** 2)
-    return t1 + t2 + t3
-
-
-def _f_expanded_schaffer(Y: torch.Tensor) -> torch.Tensor:
-    a, b  = Y[:, :-1], Y[:, 1:]
-    r2    = a ** 2 + b ** 2
-    inner = 0.5 + (torch.sin(torch.sqrt(r2)) ** 2 - 0.5) / (1 + 0.001 * r2) ** 2
-    r2w   = Y[:, -1] ** 2 + Y[:, 0] ** 2
-    wrap  = 0.5 + (torch.sin(torch.sqrt(r2w)) ** 2 - 0.5) / (1 + 0.001 * r2w) ** 2
-    return torch.sum(inner, dim=1) + wrap
-
-
-# ─── Factory ──────────────────────────────────────────────────────────────────
-
-def make_cec_benchmarks(
-    device: torch.device,
-    dim:    int,
-    seed:   int = 2024,
-) -> dict:
-    """
-    Build all CEC-style benchmark functions for the given device and dimension.
-    Shift vectors and rotation matrices are generated once from `seed` and
-    captured in closures — no file I/O, fully GPU-resident.
+    Build and return a dict of 30 CEC-style benchmark functions.
 
     Parameters
     ----------
-    device : torch.device  target device (should match the Optimizer's device)
-    dim    : int           problem dimensionality (must match runner DIM)
-    seed   : int           fixed seed for reproducibility across runs
+    device : torch.device  — target compute device (CUDA recommended)
+    dim    : int           — problem dimensionality (default 100)
+    seed   : int           — RNG seed for reproducibility
 
     Returns
     -------
-    dict   same schema as BENCHMARKS:
-           {name: {func, lower, upper, optimum, success_tol, category}}
+    dict  name → {"func", "lower", "upper", "optimum", "success_tol", "category"}
+    Compatible with runner.py's run_suite().
     """
     D     = dim
-    dtype = torch.float32
-    torch.manual_seed(seed)
+    LOWER = -100.0
+    UPPER =  100.0
+    suite: dict = {}
 
-    CEC = {}
+    # ── Seeded CPU generator — reproducible across any GPU model ─────────────
+    rng = torch.Generator()
+    rng.manual_seed(seed)
 
-    def register(name, lower, upper, optimum=0.0, success_tol=1e-2, category="cec_unimodal"):
-        def decorator(fn):
-            CEC[name] = {
-                "func":        fn,
-                "lower":       lower,
-                "upper":       upper,
-                "optimum":     optimum,
-                "success_tol": success_tol,
-                "category":    category,
-            }
-            return fn
-        return decorator
+    def _shift() -> torch.Tensor:
+        """Uniform shift vector in [−80, 80]^D placed on device."""
+        return (torch.rand(D, generator=rng) * 160.0 - 80.0).to(device)
 
-    # ── Shift+rotation factory (called once per function during setup) ────────
-    def SR(lo, hi):
-        """Return (shift_vector, rotation_matrix) pair, generated in order."""
-        o = _shift_vec(D, lo, hi, device, dtype)
-        M = _haar_rotation(D, device, dtype)
-        return o, M
+    def _rot(d: int = None) -> torch.Tensor:
+        """Random d×d orthogonal matrix via QR, placed on device."""
+        d = d or D
+        if d == 1:
+            return torch.ones(1, 1, device=device)
+        Q, _ = torch.linalg.qr(torch.randn(d, d, generator=rng))
+        return Q.to(device)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # CEC_UNIMODAL — unimodal base + rotation (hardest unimodal tests)
-    # After rotation, even separable unimodal functions become non-separable
-    # and require tracking long correlated ridges in D-dimensional space.
-    # ═════════════════════════════════════════════════════════════════════════
+    def _perm() -> torch.Tensor:
+        """Random permutation of D indices."""
+        return torch.randperm(D, generator=rng)
 
-    o, M = SR(-100, 100)
-    @register("CEC_C01_BentCigar", -100, 100,
-              optimum=0.0, success_tol=1e-4, category="cec_unimodal")
-    def cec_c01(X, _o=o, _M=M):
-        """Shifted+Rotated Bent Cigar — most ill-conditioned (cond=10⁶) + rotation."""
-        return _f_bent_cigar(_transform(X, _o, _M))
-
-    o, M = SR(-5, 10)
-    @register("CEC_C02_Zakharov", -5, 10,
-              optimum=0.0, success_tol=1e-4, category="cec_unimodal")
-    def cec_c02(X, _o=o, _M=M):
-        """Shifted+Rotated Zakharov — polynomial outer terms + rotation."""
-        return _f_zakharov(_transform(X, _o, _M))
-
-    o, M = SR(-30, 30)
-    @register("CEC_C03_Rosenbrock", -30, 30,
-              optimum=0.0, success_tol=1e-2, category="cec_unimodal")
-    def cec_c03(X, _o=o, _M=M):
-        """Shifted+Rotated Rosenbrock — curved narrow valley, non-separable."""
-        return _f_rosenbrock(_transform(X, _o, _M))
-
-    o, M = SR(-100, 100)
-    @register("CEC_C04_Elliptic", -100, 100,
-              optimum=0.0, success_tol=1e-4, category="cec_unimodal")
-    def cec_c04(X, _o=o, _M=M):
-        """Shifted+Rotated Elliptic — exponential scale spread + rotation."""
-        return _f_elliptic(_transform(X, _o, _M))
+    def _register(name: str, func, category: str, optimum: float, tol: float = 1.0):
+        suite[name] = {
+            "func":        func,
+            "lower":       LOWER,
+            "upper":       UPPER,
+            "optimum":     optimum,
+            "success_tol": tol,
+            "category":    category,
+        }
 
     # ═════════════════════════════════════════════════════════════════════════
-    # CEC_MULTIMODAL — multimodal base + rotation
-    # Rotation breaks the separable structure of the local optima grid,
-    # making the landscape far harder than the plain (unrotated) version.
-    # ═════════════════════════════════════════════════════════════════════════
-
-    o, M = SR(-5.12, 5.12)
-    @register("CEC_C05_Rastrigin", -5.12, 5.12,
-              optimum=0.0, success_tol=1e-2, category="cec_multimodal")
-    def cec_c05(X, _o=o, _M=M):
-        """Shifted+Rotated Rastrigin — grid optima scrambled by rotation."""
-        return _f_rastrigin(_transform(X, _o, _M))
-
-    o, M = SR(-32, 32)
-    @register("CEC_C06_Ackley", -32, 32,
-              optimum=0.0, success_tol=1e-2, category="cec_multimodal")
-    def cec_c06(X, _o=o, _M=M):
-        """Shifted+Rotated Ackley — deceptive flat region + rotation."""
-        return _f_ackley(_transform(X, _o, _M))
-
-    o, M = SR(-500, 500)
-    @register("CEC_C07_Schwefel", -500, 500,
-              optimum=0.0, success_tol=1.0, category="cec_multimodal")
-    def cec_c07(X, _o=o, _M=M):
-        """
-        Shifted+Rotated Modified Schwefel — boundary-located optimum + rotation.
-        ★ Hardest CEC multimodal — after rotation the boundary-seeking behaviour
-          is amplified because the optimal z* ≈ (420.97,...) is now a rotated
-          direction in x-space.  Very few algorithms solve this reliably.
-        """
-        return _f_schwefel(_transform(X, _o, _M))
-
-    o, M = SR(-600, 600)
-    @register("CEC_C08_Griewank", -600, 600,
-              optimum=0.0, success_tol=1e-4, category="cec_multimodal")
-    def cec_c08(X, _o=o, _M=M):
-        """Shifted+Rotated Griewank — near-flat ridges, variable coupling."""
-        return _f_griewank(_transform(X, _o, _M))
-
-    o, M = SR(-10, 10)
-    @register("CEC_C09_Levy", -10, 10,
-              optimum=0.0, success_tol=1e-2, category="cec_multimodal")
-    def cec_c09(X, _o=o, _M=M):
-        """Shifted+Rotated Lévy — sinusoidal structure, non-separable."""
-        return _f_levy(_transform(X, _o, _M))
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # CEC_COMPLEX — high-modal base + rotation
-    # ═════════════════════════════════════════════════════════════════════════
-
-    o, M = SR(-100, 100)
-    @register("CEC_C10_ExpandedSchaffer", -100, 100,
-              optimum=0.0, success_tol=1e-2, category="cec_complex")
-    def cec_c10(X, _o=o, _M=M):
-        """Shifted+Rotated Expanded Schaffer F6 — high-freq ripple + rotation."""
-        return _f_expanded_schaffer(_transform(X, _o, _M))
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # CEC_HYBRID — different base functions for different variable sub-groups
+    # A.  UNIMODAL FUNCTIONS  F1–F10
+    # ─────────────────────────────────────────────────────────────────────────
+    # Formula:  Fk(x) = fbase( M · ((x − o) * scale) + offset )  +  Fk*
     #
-    # The population is rotated once, then split into p% segments.
-    # Each segment is evaluated by a DIFFERENT base function.
-    # This creates a landscape whose difficulty is heterogeneous:
-    # some dimensions are easy (unimodal), others are hard (multimodal).
-    # The algorithm must simultaneously exploit AND explore.
-    #
-    # Split percentages: 40% / 40% / 20%
+    #   Fk  base  shift  scale        offset  Fk*
+    #   F1  f1    o1     1            —       100
+    #   F2  f2    o2     1            —       200
+    #   F3  f3    o3     1            —       300
+    #   F4  f4    o4     2.048/100    +1      400   (Rosenbrock optimum at all-ones)
+    #   F5  f5    o1*    1            —       500   (*reuses o1)
+    #   F6  f20   o6     0.5/100      —       600
+    #   F7  f7    o7     600/100      —       700
+    #   F8  f8    o8     5.12/100     —       800
+    #   F9  f9    o9     5.12/100     —       900
+    #   F10 f10   o10    1000/100     —       1000
     # ═════════════════════════════════════════════════════════════════════════
 
-    split1 = int(D * 0.4)
-    split2 = int(D * 0.8)
+    o_uni = [_shift() for _ in range(10)]   # o_uni[0]=o1 … o_uni[9]=o10
+    M_uni = [_rot()   for _ in range(10)]   # one full-D rotation per function
 
-    # H01: BentCigar (ill-conditioned) + Rastrigin (multimodal) + Ackley (deceptive)
-    oA, MA = SR(-100, 100)
-    oB, MB = SR(-5.12, 5.12)
-    oC, MC = SR(-32, 32)
-    @register("CEC_H01_Hybrid_BCR_Rastrigin_Ackley", -100, 100,
-              optimum=0.0, success_tol=1.0, category="cec_hybrid")
-    def cec_h01(X,
-                _oA=oA, _MA=MA,
-                _oB=oB, _MB=MB,
-                _oC=oC, _MC=MC,
-                _s1=split1, _s2=split2):
-        """
-        40% → Bent Cigar (ill-cond. unimodal)
-        40% → Rastrigin  (multimodal)
-        20% → Ackley     (deceptive multimodal)
-        All three sub-groups have independent shifts and rotations.
-        """
-        ZA = _transform(X, _oA, _MA)
-        ZB = _transform(X, _oB, _MB)
-        ZC = _transform(X, _oC, _MC)
-        fA = _f_bent_cigar(ZA[:, :_s1])
-        fB = _f_rastrigin(ZB[:, _s1:_s2])
-        fC = _f_ackley(ZC[:, _s2:])
-        return fA + fB + fC
+    def _make_uni(base_fn, shift, rot, scale, offset, F_star):
+        _o, _M, _off = shift, rot, offset
+        def _fn(X: torch.Tensor) -> torch.Tensor:
+            z = (X - _o) * scale
+            z = z @ _M.T
+            if _off is not None:
+                z = z + _off
+            return base_fn(z) + F_star
+        return _fn
 
-    # H02: Elliptic (exp-scaled) + Rosenbrock (narrow valley) + Schwefel (boundary)
-    oA, MA = SR(-100, 100)
-    oB, MB = SR(-30, 30)
-    oC, MC = SR(-500, 500)
-    @register("CEC_H02_Hybrid_Elliptic_Rosenbrock_Schwefel", -100, 100,
-              optimum=0.0, success_tol=1.0, category="cec_hybrid")
-    def cec_h02(X,
-                _oA=oA, _MA=MA,
-                _oB=oB, _MB=MB,
-                _oC=oC, _MC=MC,
-                _s1=split1, _s2=split2):
-        """
-        40% → Elliptic   (exp-conditioned unimodal)
-        30% → Rosenbrock (curved valley unimodal)
-        30% → Schwefel   (deceptive boundary-optimum multimodal)
-        """
-        ZA = _transform(X, _oA, _MA)
-        ZB = _transform(X, _oB, _MB)
-        ZC = _transform(X, _oC, _MC)
-        fA = _f_elliptic(ZA[:, :_s1])
-        fB = _f_rosenbrock(ZB[:, _s1:_s2])
-        fC = _f_schwefel(ZC[:, _s2:].clamp(-500, 500))
-        return fA + fB + fC
+    _register("F01_Uni_BentCigar",
+              _make_uni(F1,  o_uni[0], M_uni[0], 1.0,         None, 100.0),
+              "unimodal", 100.0)
+
+    _register("F02_Uni_DiffPowers",
+              _make_uni(F2,  o_uni[1], M_uni[1], 1.0,         None, 200.0),
+              "unimodal", 200.0)
+
+    _register("F03_Uni_Zakharov",
+              _make_uni(F3,  o_uni[2], M_uni[2], 1.0,         None, 300.0),
+              "unimodal", 300.0)
+
+    _register("F04_Uni_Rosenbrock",
+              _make_uni(F4,  o_uni[3], M_uni[3], 2.048 / 100, 1.0,  400.0),
+              "unimodal", 400.0)
+
+    # F5 intentionally reuses o1 (o_uni[0]) with a fresh rotation (M_uni[4])
+    _register("F05_Uni_Rastrigin",
+              _make_uni(F5,  o_uni[0], M_uni[4], 1.0,         None, 500.0),
+              "unimodal", 500.0)
+
+    _register("F06_Uni_SchafferF7",
+              _make_uni(F20, o_uni[5], M_uni[5], 0.5  / 100,  None, 600.0),
+              "unimodal", 600.0)
+
+    _register("F07_Uni_LunacekBiRastrigin",
+              _make_uni(F7,  o_uni[6], M_uni[6], 600  / 100,  None, 700.0),
+              "unimodal", 700.0)
+
+    _register("F08_Uni_NonContRastrigin",
+              _make_uni(F8,  o_uni[7], M_uni[7], 5.12 / 100,  None, 800.0),
+              "unimodal", 800.0)
+
+    _register("F09_Uni_Levy",
+              _make_uni(F9,  o_uni[8], M_uni[8], 5.12 / 100,  None, 900.0),
+              "unimodal", 900.0)
+
+    _register("F10_Uni_ModSchwefel",
+              _make_uni(F10, o_uni[9], M_uni[9], 1000 / 100,  None, 1000.0),
+              "unimodal", 1000.0)
 
     # ═════════════════════════════════════════════════════════════════════════
-    # CEC_COMPOSITION — weighted mixture of 5 component functions
+    # B.  HYBRID FUNCTIONS  F11–F20
+    # ─────────────────────────────────────────────────────────────────────────
+    # Formula:
+    #   1. z   = (x − o)[σ]       — shift then apply random dimension permutation σ
+    #   2. split z into N sub-vectors z1…zN  according to proportions props
+    #   3. Fk(x) = Σ_i g_i( Mi · zi )  +  Fk*
     #
-    # Each component has its own shift and rotation.
-    # Weight of component k for point x:
-    #     w_k(x) = exp(−‖x − o_k‖² / (2·D·σ_k²))
-    # Final value:
-    #     f(x) = Σ_k [w_k(x) · (λ_k · g_k(Z_k) + bias_k)] / Σ_k w_k(x)
-    #
-    # σ controls basin width (wider σ → larger attraction radius).
-    # λ normalises each component to a common scale so no single one
-    # dominates the landscape — based on CEC 2017 standard values.
-    # bias ensures the function has exactly one global minimum (at o_0).
-    #
-    # This is the gold-standard composition test:
-    #   ★ The algorithm must find the CORRECT BASIN (component 0)
-    #     not just any local minimum.
-    #   ★ The other 4 components are locally attractive but sub-optimal.
+    #   Fk   N  props                         component functions (fi index, 1-based)
+    #   F11  3  [.2,.4,.4]                    f3,  f4,  f5
+    #   F12  3  [.3,.3,.4]                    f11, f10, f1
+    #   F13  3  [.3,.3,.4]                    f1,  f4,  f7
+    #   F14  4  [.2,.2,.2,.4]                 f11, f13, f20, f5
+    #   F15  4  [.2,.2,.3,.3]                 f11, f13, f20, f5
+    #   F16  4  [.2,.2,.3,.3]                 f6,  f18, f4,  f10
+    #   F17  5  [.1,.2,.2,.2,.3]              f16, f13, f5,  f18, f12
+    #   F18  5  [.2,.2,.2,.2,.2]              f1,  f13, f5,  f18, f12
+    #   F19  5  [.2,.2,.2,.2,.2]              f1,  f5,  f19, f14, f6
+    #   F20  6  [.1,.1,.2,.2,.2,.2]           f17, f16, f13, f5,  f10, f20
     # ═════════════════════════════════════════════════════════════════════════
 
-    # Components: Rastrigin, Griewank, Elliptic, Ackley, Schwefel
-    # λ values from CEC 2017 paper (normalise component scales at σ distance)
-    _comp_fns     = [_f_rastrigin, _f_griewank, _f_elliptic, _f_ackley, _f_schwefel]
-    _comp_sigmas  = [10.0,  20.0,  30.0,  40.0,  50.0]
-    _comp_lambdas = [1.0,   10.0,  1e-6,  1.0,   5e-4]  # CEC 2017 standard
-    _comp_biases  = [0.0,   100.0, 200.0, 300.0, 400.0]
+    def _make_hybrid(name: str, props: list, fn_idx: list, F_star: float):
+        sizes      = [int(p * D) for p in props]
+        sizes[-1]  = D - sum(sizes[:-1])          # absorb rounding remainder
+        shift      = _shift()
+        perm       = _perm()
+        sub_rots   = [_rot(sz) for sz in sizes]   # independent di×di rotation per component
+        fns        = [_BASIC[i] for i in fn_idx]
 
-    # Pre-generate 5 shift+rotation pairs
-    _comp_oMs = [SR(-100, 100) for _ in range(5)]   # list of (o, M) tuples
+        _shift_v, _perm_v = shift, perm
+        _sub_rots, _sizes, _fns = sub_rots, sizes, fns
 
-    @register("CEC_P01_Composition5", -100, 100,
-              optimum=0.0, success_tol=1.0, category="cec_composition")
-    def cec_p01(X,
-                _oMs    = _comp_oMs,
-                _fns    = _comp_fns,
-                _sigmas = _comp_sigmas,
-                _lams   = _comp_lambdas,
-                _biases = _comp_biases):
-        """
-        5-component composition function.
-        Components: Rastrigin + Griewank + Elliptic + Ackley + Schwefel
-        The global optimum is at o_0 (Rastrigin component's shift), with
-        value = _biases[0] = 0.  Other components add biases [100,200,300,400]
-        to ensure the global minimum is unambiguously at component 0.
+        def _fn(X: torch.Tensor) -> torch.Tensor:
+            z     = (X - _shift_v)[:, _perm_v]    # shift + dimension shuffle (pop, D)
+            out   = torch.zeros(X.shape[0], device=X.device)
+            start = 0
+            for sz, rot, f in zip(_sizes, _sub_rots, _fns):
+                sub = z[:, start:start + sz] @ rot.T   # (pop, sz)
+                out = out + f(sub)
+                start += sz
+            return out + F_star
 
-        λ normalisation (CEC 2017 values) ensures all 5 basins contribute
-        comparably so the composition is neither trivially easy (one component
-        completely dominates) nor trivially equivalent (flat basin weights).
-        """
-        N, _D = X.shape
-        n     = len(_fns)
+        _register(name, _fn, "hybrid", F_star)
 
-        weights = torch.empty(N, n, device=X.device, dtype=X.dtype)
-        f_vals  = torch.empty(N, n, device=X.device, dtype=X.dtype)
+    _make_hybrid("F11_Hyb3_ZakRosRas",         [0.2, 0.4, 0.4],              [3, 4, 5],              1100.0)
+    _make_hybrid("F12_Hyb3_EllSchwRos",        [0.3, 0.3, 0.4],              [11, 10, 1],            1200.0)
+    _make_hybrid("F13_Hyb3_BenRosLun",         [0.3, 0.3, 0.4],              [1, 4, 7],              1300.0)
+    _make_hybrid("F14_Hyb4_EllAckSchRas",      [0.2, 0.2, 0.2, 0.4],         [11, 13, 20, 5],        1400.0)
+    _make_hybrid("F15_Hyb4_EllAckSchRas2",     [0.2, 0.2, 0.3, 0.3],         [11, 13, 20, 5],        1500.0)
+    _make_hybrid("F16_Hyb4_SchHGBRosSchw",     [0.2, 0.2, 0.3, 0.3],         [6, 18, 4, 10],         1600.0)
+    _make_hybrid("F17_Hyb5_KatAckRasHGBDis",   [0.1, 0.2, 0.2, 0.2, 0.3],    [16, 13, 5, 18, 12],    1700.0)
+    _make_hybrid("F18_Hyb5_BenAckRasHGBDis",   [0.2, 0.2, 0.2, 0.2, 0.2],    [1, 13, 5, 18, 12],     1800.0)
+    _make_hybrid("F19_Hyb5_BenRasEGRWeiSch",   [0.2, 0.2, 0.2, 0.2, 0.2],    [1, 5, 19, 14, 6],      1900.0)
+    _make_hybrid("F20_Hyb6_Mixed",             [0.1, 0.1, 0.2, 0.2, 0.2, 0.2],[17, 16, 13, 5, 10, 20],2000.0)
 
-        for k in range(n):
-            o_k, M_k = _oMs[k]
-            diff     = X - o_k.unsqueeze(0)                        # (N, D)
-            dist2    = torch.sum(diff ** 2, dim=1)                  # (N,)
-            weights[:, k] = torch.exp(-dist2 / (2.0 * _D * _sigmas[k] ** 2))
-            Z_k           = diff @ M_k                              # (N, D)
-            f_vals[:, k]  = _lams[k] * _fns[k](Z_k) + _biases[k]
+    # ═════════════════════════════════════════════════════════════════════════
+    # C.  COMPOSITE FUNCTIONS  F21–F30
+    # ─────────────────────────────────────────────────────────────────────────
+    # Formula:
+    #   wi   = exp(−‖x−oi‖² / (2·D·σi²)) / ‖x−oi‖     (→ large when ‖x−oi‖≈0)
+    #   ωi   = wi / Σ_k wk
+    #   Fk(x)= Σ_i ωi · [ λi · gi( Mi·(x−oi) ) + biasi ]  +  Fk*
+    #
+    #   Fk   N  σ                       λ                           bias          g (fi index)
+    #   F21  3  [10,20,30]              [1,1e-6,1]                  [0,100,200]   f5,f11,f4
+    #   F22  3  [10,20,30]              [1,10,1]                    [0,100,200]   f5,f15,f10
+    #   F23  4  [10,20,30,40]           [1,10,1,1]                  [0..300]      f4,f13,f10,f5
+    #   F24  4  [10,20,30,40]           [10,1e-6,10,1]              [0..300]      f13,f11,f15,f5
+    #   F25  5  [10,20,30,40,50]        [10,1,1e-6,10,1]            [0..400]      f5,f17,f13,f12,f4
+    #   F26  5  [10,20,30,40,50]        [1e-26,10,1e-6,10,5e-4]     [0..400]      f6,f10,f15,f4,f5
+    #   F27  6  [10,20,30,40,50,60]     [10,10,2.5,1e-26,1e-6,5e-4] [0..500]      f18,f5,f10,f1,f11,f6
+    #   F28  6  [10,20,30,40,50,60]     [10,10,1e-6,1,1,5e-4]       [0..500]      f13,f15,f12,f4,f17,f6
+    #   F29  3  [10,30,50]              [1,1,1]                     [0,100,200]   f5,f20,f7
+    #   F30  3  [10,30,50]              [1,1,1]                     [0,100,200]   f5,f8,f9
+    # ═════════════════════════════════════════════════════════════════════════
 
-        # Normalise weights; fall back to uniform when all weights underflow
-        w_sum   = weights.sum(dim=1, keepdim=True).clamp(min=1e-30)
-        weights = weights / w_sum
+    def _make_composite(
+        name:    str,
+        sigmas:  list,
+        lambdas: list,
+        biases:  list,
+        fn_idx:  list,
+        F_star:  float,
+    ):
+        N    = len(fn_idx)
+        lams = (list(lambdas) + [1.0] * N)[:N]   # defensive padding
+        bvec = (list(biases)  + [0.0] * N)[:N]
 
-        return torch.sum(weights * f_vals, dim=1)
+        shifts = [_shift() for _ in range(N)]
+        rots   = [_rot()   for _ in range(N)]
+        fns    = [_BASIC[i] for i in fn_idx]
 
-    return CEC
+        # Precompute 2·D·σi² on device for vectorised weight computation
+        _sig2     = torch.tensor([2.0 * D * s ** 2 for s in sigmas], device=device, dtype=torch.float32)
+        _lam      = torch.tensor(lams, device=device, dtype=torch.float32)
+        _bias     = torch.tensor(bvec, device=device, dtype=torch.float32)
+        _shifts_t = torch.stack(shifts, dim=0)    # (N, D) — for vectorised distance
+        _shifts   = shifts                         # list kept for per-component rotation
+        _rots     = rots
+        _fns      = fns
+
+        def _fn(X: torch.Tensor) -> torch.Tensor:
+            pop = X.shape[0]
+
+            # ── Weights (vectorised over N) ───────────────────────────────────
+            diff    = X.unsqueeze(1) - _shifts_t.unsqueeze(0)   # (pop, N, D)
+            dist_sq = torch.sum(diff ** 2, dim=2)               # (pop, N)
+            dist    = torch.sqrt(dist_sq)
+            numer   = torch.exp(-dist_sq / _sig2.unsqueeze(0))  # (pop, N)
+            w       = torch.where(
+                dist < 1e-10,
+                torch.full_like(dist, torch.finfo(dist.dtype).max),
+                numer / dist.clamp(min=torch.finfo(dist.dtype).tiny),
+            )
+            omega   = w / w.sum(dim=1, keepdim=True).clamp(min=1e-300)  # (pop, N)
+
+            # ── Component values ──────────────────────────────────────────────
+            out = torch.zeros(pop, device=X.device)
+            for i, (f, rot, sh) in enumerate(zip(_fns, _rots, _shifts)):
+                z   = (X - sh) @ rot.T
+                out = out + omega[:, i] * (_lam[i] * f(z) + _bias[i])
+
+            return out + F_star
+
+        _register(name, _fn, "composite", F_star)
+
+    _make_composite("F21_Comp3_RasEllRos",
+        sigmas=[10,20,30], lambdas=[1,1e-6,1], biases=[0,100,200],
+        fn_idx=[5,11,4], F_star=2100.0)
+
+    _make_composite("F22_Comp3_RasGriSchw",
+        sigmas=[10,20,30], lambdas=[1,10,1], biases=[0,100,200],
+        fn_idx=[5,15,10], F_star=2200.0)
+
+    _make_composite("F23_Comp4_RosAckSchwRas",
+        sigmas=[10,20,30,40], lambdas=[1,10,1,1], biases=[0,100,200,300],
+        fn_idx=[4,13,10,5], F_star=2300.0)
+
+    _make_composite("F24_Comp4_AckEllGriRas",
+        sigmas=[10,20,30,40], lambdas=[10,1e-6,10,1], biases=[0,100,200,300],
+        fn_idx=[13,11,15,5], F_star=2400.0)
+
+    _make_composite("F25_Comp5_RasHCatAckDisRos",
+        sigmas=[10,20,30,40,50], lambdas=[10,1,1e-6,10,1], biases=[0,100,200,300,400],
+        fn_idx=[5,17,13,12,4], F_star=2500.0)
+
+    _make_composite("F26_Comp5_SchSchwGriRosRas",
+        sigmas=[10,20,30,40,50], lambdas=[1e-26,10,1e-6,10,5e-4], biases=[0,100,200,300,400],
+        fn_idx=[6,10,15,4,5], F_star=2600.0)
+
+    _make_composite("F27_Comp6_HGBRasSchwBenEllSch",
+        sigmas=[10,20,30,40,50,60], lambdas=[10,10,2.5,1e-26,1e-6,5e-4], biases=[0,100,200,300,400,500],
+        fn_idx=[18,5,10,1,11,6], F_star=2700.0)
+
+    _make_composite("F28_Comp6_AckGriDisRosHCatSch",
+        sigmas=[10,20,30,40,50,60], lambdas=[10,10,1e-6,1,1,5e-4], biases=[0,100,200,300,400,500],
+        fn_idx=[13,15,12,4,17,6], F_star=2800.0)
+
+    _make_composite("F29_Comp3_RasSchLun",
+        sigmas=[10,30,50], lambdas=[1,1,1], biases=[0,100,200],
+        fn_idx=[5,20,7], F_star=2900.0)
+
+    _make_composite("F30_Comp3_RasNonContLev",
+        sigmas=[10,30,50], lambdas=[1,1,1], biases=[0,100,200],
+        fn_idx=[5,8,9], F_star=3000.0)
+
+    return suite
