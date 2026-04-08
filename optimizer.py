@@ -250,6 +250,7 @@ class Optimizer:
 
             # ── Elite preservation: inject global best into last slot ─────────
             # Guarantees the best-ever solution survives to the next evaluation.
-            population[-1] = best_vec
+            if best_vec is not None :
+              population[-1] = best_vec
 
         return best_value

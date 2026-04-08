@@ -39,7 +39,7 @@ def F3(X):
 def F4(X):
     xi = X[:, :-1]
     xi1 = X[:, 1:]
-    return torch.sum(100 * (xi - xi1)**2 + (xi - 1)**2, dim=1)
+    return torch.sum(100 * (xi1 - xi**2)**2 + (xi - 1)**2, dim=1)
 
 
 @register("F5_Rastrigin", -5.12, 5.12)
@@ -87,8 +87,8 @@ def F9(X):
 
     term1 = torch.sin(math.pi * w[:, 0])**2
 
-    wi = w[:, :-1]
-    term2 = torch.sum((wi - 1)**2 * (1 + 10 * torch.sin(math.pi * wi + 1)**2), dim=1)
+    wi = w[:, :-1]   # w₁ … w_{D-1}  for the (wᵢ−1)² term
+    term2 = torch.sum((wi - 1)**2 * (1 + 10 * torch.sin(math.pi * w[:, 1:])**2), dim=1)
 
     wd = w[:, -1]
     term3 = (wd - 1)**2 * (1 + torch.sin(2 * math.pi * wd)**2)
