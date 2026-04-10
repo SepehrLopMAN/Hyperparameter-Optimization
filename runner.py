@@ -42,6 +42,7 @@ Parameter choices (all validated against CEC research standards)
 import torch
 import time
 import statistics
+import math
 import csv
 import sys
 
@@ -75,6 +76,13 @@ _ITERS = MAX_FES // POP_SIZE         # iterations per run (≈ 976)
 def _fmt(v: float) -> str:
     """Compact signed scientific notation, always 10 chars wide."""
     return f"{v:+.3e}"
+
+
+def _safe_stdev(scores: list) -> float:
+    finite = [s for s in scores if math.isfinite(s)]
+    if len(finite) < 2:
+        return float("inf")
+    return statistics.stdev(finite)
 
 
 def _print_row(name, best, mean, std, median, worst, succ, t_mean):
@@ -131,6 +139,7 @@ def run_suite(suite: dict, suite_label: str) -> list:
             func    = data["func"]
             lower   = data["lower"]
             upper   = data["upper"]
+            dim     = data.get("dim", DIM)
             optimum = data.get("optimum", 0.0)
             tol     = data.get("success_tol", 1e-4)
 
@@ -140,7 +149,7 @@ def run_suite(suite: dict, suite_label: str) -> list:
             for _ in range(RUNS):
                 opt = Optimizer(
                     pop_size=POP_SIZE,
-                    dim=DIM,
+                    dim=dim,
                     lower=lower,
                     upper=upper,
                     max_fes=MAX_FES,
@@ -157,7 +166,7 @@ def run_suite(suite: dict, suite_label: str) -> list:
             mx     = max(scores)
             mean   = statistics.mean(scores)
             med    = statistics.median(scores)
-            std    = statistics.stdev(scores) if RUNS > 1 else 0.0
+            std    = _safe_stdev(scores) if RUNS > 1 else 0.0
             succ   = sum(1 for s in scores if abs(s - optimum) <= tol)
             t_mu   = statistics.mean(runtimes)
 
