@@ -23,7 +23,8 @@ def F1(X):
 def F2(X):
     D = X.shape[1]
     powers = torch.arange(2, D + 2, device=X.device).float()
-    return torch.sum(torch.abs(X) ** powers, dim=1)
+    X_norm = X / 100.0          # map [-100,100] → [-1,1] before applying powers
+    return torch.sum(torch.abs(X_norm) ** powers, dim=1)
 
 
 @register("F3_Zakharov", -100, 100)
