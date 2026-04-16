@@ -17,18 +17,21 @@ class Optimizer:
 
         FEs = 0
         best_value = float("inf")
+        best_vec = None
 
         while FEs < self.max_fes:
 
             fitness = func(wolves)
             FEs += self.pop_size
 
-            best_value = min(best_value, torch.min(fitness).item())
-
             idx = torch.argsort(fitness)
             alpha = wolves[idx[0]].unsqueeze(0)
-            beta = wolves[idx[1]].unsqueeze(0)
+            beta  = wolves[idx[1]].unsqueeze(0)
             delta = wolves[idx[2]].unsqueeze(0)
+
+            if fitness[idx[0]].item() < best_value:
+                best_value = fitness[idx[0]].item()
+                best_vec = wolves[idx[0]].clone()
 
             a = 2 - 2 * (FEs / self.max_fes)
 
@@ -51,5 +54,8 @@ class Optimizer:
             X3 = delta - A3 * torch.abs(C3*delta - wolves)
 
             wolves = torch.clamp((X1 + X2 + X3)/3, self.lower, self.upper)
+
+            if best_vec is not None:
+                wolves[-1] = best_vec
 
         return best_value
