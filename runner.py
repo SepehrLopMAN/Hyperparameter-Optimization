@@ -1,5 +1,5 @@
 """
-runner.py  —  GWOGA Benchmark Runner
+runner.py  —  PSO Benchmark Runner
 =====================================
 Entry point for benchmarking the optimizer against the full classic + CEC suite.
 
@@ -20,10 +20,9 @@ Parameter choices (all validated against CEC research standards)
                       and most discriminating.  DO NOT reduce for benchmarking.
 
     POP_SIZE = 1024   Large population is justified by GPU parallelism:
-                      evaluating 1024 wolves costs almost the same GPU time
+                      evaluating 1024 particles costs almost the same GPU time
                       as evaluating 32 (kernel launch dominates, not compute).
-                      More wolves → better initial coverage → less re-runs.
-                      Standard GWO uses 30–50; 1024 is the GPU-native sweet spot.
+                      More particles → better initial coverage → less re-runs.
 
     RUNS     = 30     The IEEE CEC standard.  30 independent random seeds give
                       sufficient power to detect algorithm differences at p<0.05
@@ -205,7 +204,7 @@ def main():
     # ── Header ────────────────────────────────────────────────────────────────
     t_total = time.time()
     print(SEP)
-    print(f"  GWOGA Benchmark Suite")
+    print(f"  PSO Benchmark Suite")
     print(f"  DIM={DIM}  POP={POP_SIZE}  RUNS={RUNS}  "
           f"MAX_FES={MAX_FES:,}  (~{_ITERS} iterations/run)")
     print(f"  Device : {gpu_name}")

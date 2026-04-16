@@ -27,21 +27,30 @@ class Optimizer:
 
         FEs = self.pop_size
         gbest_val, g_idx = torch.min(pbest_val, dim=0)
-        gbest = pbest[g_idx]
+        gbest = pbest[g_idx].clone()
 
         best_value = gbest_val.item()
+        v_max = (self.upper - self.lower) * 0.2
 
         while FEs < self.max_fes:
 
             r1 = torch.rand_like(pos)
             r2 = torch.rand_like(pos)
 
-            vel = (self.w * vel +
+            progress = FEs / self.max_fes
+            w = self.w - 0.3 * progress
+
+            vel = (w * vel +
                    self.c1 * r1 * (pbest - pos) +
                    self.c2 * r2 * (gbest - pos))
 
+            vel = torch.clamp(vel, -v_max, v_max)
+
             pos = pos + vel
             pos = torch.clamp(pos, self.lower, self.upper)
+
+            at_bound = (pos <= self.lower) | (pos >= self.upper)
+            vel[at_bound] = 0.0
 
             fitness = func(pos)
             FEs += self.pop_size
@@ -51,7 +60,7 @@ class Optimizer:
             pbest_val[better] = fitness[better]
 
             gbest_val, g_idx = torch.min(pbest_val, dim=0)
-            gbest = pbest[g_idx]
+            gbest = pbest[g_idx].clone()
 
             best_value = min(best_value, gbest_val.item())
 
