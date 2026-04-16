@@ -1,5 +1,5 @@
 """
-runner.py  —  GWOGA Benchmark Runner
+runner.py  —  GWO Benchmark Runner
 =====================================
 Entry point for benchmarking the optimizer against the full classic + CEC suite.
 
@@ -205,7 +205,7 @@ def main():
     # ── Header ────────────────────────────────────────────────────────────────
     t_total = time.time()
     print(SEP)
-    print(f"  GWOGA Benchmark Suite")
+    print(f"  M-GWO Benchmark Suite")
     print(f"  DIM={DIM}  POP={POP_SIZE}  RUNS={RUNS}  "
           f"MAX_FES={MAX_FES:,}  (~{_ITERS} iterations/run)")
     print(f"  Device : {gpu_name}")
