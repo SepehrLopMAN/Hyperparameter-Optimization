@@ -56,7 +56,8 @@ DIM      = 100
 POP_SIZE = 1024
 RUNS     = 30
 MAX_FES  = 10000 * DIM      # 1,000,000  — CEC standard for D = 100
-CSV_OUT  = "benchmark_results.csv"
+DEVICE_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+CSV_OUT  = f"DE_{DIM}-{POP_SIZE}_{DEVICE_NAME}_benchmark_results.csv"
 
 # ─── Build CEC benchmarks on the target device ────────────────────────────────
 # Shift vectors and rotation matrices are generated here (on GPU) and captured
@@ -197,8 +198,6 @@ def run_suite(suite: dict, suite_label: str) -> list:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
-
     _warmup()
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -207,7 +206,7 @@ def main():
     print(f"  DE Benchmark Suite")
     print(f"  DIM={DIM}  POP={POP_SIZE}  RUNS={RUNS}  "
           f"MAX_FES={MAX_FES:,}  (~{_ITERS} iterations/run)")
-    print(f"  Device : {gpu_name}")
+    print(f"  Device : {DEVICE_NAME}")
     print(f"  Classic: {len(BENCHMARKS)} functions  |  "
           f"CEC-style: {len(CEC_BENCHMARKS)} functions  |  "
           f"Total: {len(BENCHMARKS)+len(CEC_BENCHMARKS)}")
