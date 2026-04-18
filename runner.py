@@ -1,5 +1,5 @@
 """
-runner.py  —  *** Benchmark Runner
+runner.py  —  AMALGAM-SO Benchmark Runner
 =====================================
 Entry point for benchmarking the optimizer against the full classic + CEC suite.
 
@@ -57,7 +57,7 @@ POP_SIZE = 1024
 RUNS     = 30
 MAX_FES  = 10000 * DIM      # 1,000,000  — CEC standard for D = 100
 DEVICE_NAME = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
-CSV_OUT  = f"***_{DIM}-{POP_SIZE}_{DEVICE_NAME}_benchmark_results.csv"
+CSV_OUT  = f"AMALGAM-SO_{DIM}-{POP_SIZE}_{DEVICE_NAME}_benchmark_results.csv"
 
 # ─── Build CEC benchmarks on the target device ────────────────────────────────
 # Shift vectors and rotation matrices are generated here (on GPU) and captured
@@ -203,7 +203,7 @@ def main():
     # ── Header ────────────────────────────────────────────────────────────────
     t_total = time.time()
     print(SEP)
-    print(f"  *** Benchmark Suite")
+    print(f"  AMALGAM-SO Benchmark Suite")
     print(f"  DIM={DIM}  POP={POP_SIZE}  RUNS={RUNS}  "
           f"MAX_FES={MAX_FES:,}  (~{_ITERS} iterations/run)")
     print(f"  Device : {DEVICE_NAME}")
