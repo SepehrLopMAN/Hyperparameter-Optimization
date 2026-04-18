@@ -60,6 +60,15 @@ class Optimizer:
         self.max_fes  = max_fes
         self.device   = device
 
+        # Lévy sigma — beta=1.5 is a fixed constant; precomputed once here on CPU
+        # (math.gamma is a scalar CPU call — correct place is initialisation, not the loop)
+        # stored as a plain Python float; PyTorch fuses it into GPU kernels at runtime
+        _b = 1.5
+        self._levy_sigma = (
+            math.gamma(1.0 + _b) * math.sin(math.pi * _b / 2.0)
+            / (math.gamma((1.0 + _b) / 2.0) * _b * 2.0 ** ((_b - 1.0) / 2.0))
+        ) ** (1.0 / _b)
+
     # ─────────────────────────────────────────────────────────────────────────
     # Private helpers  (all GPU-resident, no .item() / .cpu() inside)
     # ─────────────────────────────────────────────────────────────────────────
@@ -148,19 +157,13 @@ class Optimizer:
 
     def _levy_step(self, scale: float) -> torch.Tensor:
         """
-        Mantegna's algorithm for a Lévy-distributed step vector — on GPU.
-        sigma is a scalar constant, computed once; randn ops are fully CUDA.
+        Mantegna's algorithm for a Lévy-distributed step vector — fully GPU-resident.
+        sigma (≈0.7197) is precomputed once in __init__; no CPU work in this path.
         beta = 1.5 gives a heavy but not extreme tail (standard choice).
         """
-        beta  = 1.5
-        sigma = (
-            math.gamma(1.0 + beta) * math.sin(math.pi * beta / 2.0)
-            / (math.gamma((1.0 + beta) / 2.0) * beta * 2.0 ** ((beta - 1.0) / 2.0))
-        ) ** (1.0 / beta)
-
-        u = torch.randn(self.dim, device=self.device) * sigma
+        u = torch.randn(self.dim, device=self.device) * self._levy_sigma
         v = torch.abs(torch.randn(self.dim, device=self.device)) + 1e-12
-        return (u / v ** (1.0 / beta)) * scale
+        return (u / v ** (1.0 / 1.5)) * scale
 
     # ─────────────────────────────────────────────────────────────────────────
     # Main optimisation loop
